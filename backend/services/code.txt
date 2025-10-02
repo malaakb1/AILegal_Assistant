@@ -1,0 +1,681 @@
+# services/deepsearch.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import os
+import re
+import json
+import time
+import logging
+import datetime
+from typing import Any, Dict, List, Tuple, Optional, Iterable
+
+import httpx
+import tldextract
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
+
+logger = logging.getLogger(__name__)
+
+# -------- OpenAI settings --------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_1")
+OPENAI_DEEP_MODEL = os.getenv("OPENAI_DEEP_MODEL", "o4-mini-deep-research")
+OPENAI_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "o3-deep-research")
+OPENAI_ALT_MODEL = os.getenv("OPENAI_ALT_MODEL", "gpt-4.1")  # modern general model
+OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "3600"))
+OPENAI_MAX_TOOL_CALLS = int(os.getenv("OPENAI_MAX_TOOL_CALLS", "40"))
+OPENAI_RETRIES = int(os.getenv("OPENAI_RETRIES", "3"))
+OPENAI_BACKOFF_BASE = float(os.getenv("OPENAI_BACKOFF_BASE", "0.6"))
+
+# Optional feature flags
+OPENAI_ENABLE_CODE_INTERPRETER = os.getenv("OPENAI_ENABLE_CODE_INTERPRETER", "0").lower() in {"1","true","yes","on"}
+OPENAI_VECTOR_STORES = [s for s in (os.getenv("OPENAI_VECTOR_STORES", "").strip() or "").split(",") if s.strip()]
+OPENAI_BACKGROUND = os.getenv("OPENAI_BACKGROUND", "0").lower() in {"1","true","yes","on"}
+
+_client: Optional[OpenAI] = None
+if OPENAI_API_KEY and OpenAI is not None:
+    try:
+        _client = OpenAI(timeout=OPENAI_TIMEOUT)
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"OpenAI client init failed: {e}")
+        _client = None
+else:
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY is missing; deep research will be disabled.")
+    if OpenAI is None:
+        logger.warning("openai python SDK not available; deep research will be disabled.")
+
+# (other module-level constants such as BLOCKED, ALLOWED, SERPAPI_DISABLED, SERPAPI_KEY
+# are assumed to be defined elsewhere in the package if you use SerpAPI fallback)
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+def _host(url: str) -> str:
+    t = tldextract.extract(url)
+    return f"{t.domain}.{t.suffix}" if t.suffix else t.domain
+
+
+def _allowed(url: str) -> bool:
+    h = _host(url)
+    if any(b for b in BLOCKED if b and b in h):
+        return False
+    if ALLOWED:
+        return any(a for a in ALLOWED if a and a in h)
+    return True
+
+
+def _to_str(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, (int, float)):
+        return str(x)
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (list, tuple, set)):
+        return ", ".join([_to_str(v).strip() for v in x if _to_str(v).strip()])
+    try:
+        return json.dumps(x, ensure_ascii=False)
+    except Exception:
+        return str(x)
+
+
+def _parse_sources_list(s: str) -> List[str]:
+    if not s:
+        return []
+    return [p.strip() for p in s.replace("،", ",").split(",") if p.strip()]
+
+
+_STOPWORDS = {
+    "،",
+    ",",
+    "هذا",
+    "هذه",
+    "ذلك",
+    "تكون",
+    "يكون",
+    "على",
+    "في",
+    "من",
+    "عن",
+    "إلى",
+    "التي",
+    "الذي",
+    "الذين",
+    "مع",
+    "قد",
+    "وقد",
+    "هو",
+    "هي",
+    "او",
+    "أو",
+    "بين",
+    "كما",
+    "ما",
+    "ولا",
+    "لم",
+    "لن",
+    "كان",
+    "وكان",
+    "داخل",
+    "خارج",
+    "and",
+    "or",
+    "the",
+    "a",
+    "of",
+    "for",
+    "to",
+    "by",
+}
+
+_AR_PREFIXES = ("وال", "فال", "بال", "كال", "لل", "ال", "و")
+
+
+def _strip_prefixes(tok: str) -> str:
+    t = tok
+    changed = True
+    while changed:
+        changed = False
+        for p in _AR_PREFIXES:
+            if t.startswith(p) and len(t) > len(p) + 1:
+                t = t[len(p) :]
+                changed = True
+    return t
+
+
+def _norm_token(tok: str) -> str:
+    t = tok.strip().lower()
+    t = re.sub(r"[^\w\u0600-\u06FF]+", "", t)
+    return _strip_prefixes(t)
+
+
+def _normalize_answers(scope: Dict[str, Any]) -> Dict[str, str]:
+    law_subject = _to_str(scope.get("law_subject")).strip() or "موضوع قانون غير محدد"
+    geo = _to_str(scope.get("geo") or scope.get("geography")).strip() or "جميع دول العالم"
+    timeframe = _to_str(scope.get("timeframe")).strip() or "آخر 10 سنوات"
+    subject_refine = _to_str(scope.get("subject_refine") or scope.get("subject")).strip()
+    sources = _to_str(scope.get("sources") or "جميع المصادر")
+    return {
+        "law_subject": law_subject,
+        "geo": geo,
+        "timeframe": timeframe,
+        "sources": sources,
+        "subject_refine": subject_refine,
+    }
+
+
+def deepsearch_questions(_model_unused: Any, base_article: Dict[str, Any]) -> Dict[str, Any]:
+    article_title = (base_article.get("article_title") or "").strip()
+    prefill = {
+        "law_subject": "",
+        "geo": "جميع دول العالم",
+        "timeframe": "آخر 10 سنوات",
+        "sources": "تشريعات، معايير دولية، بحوث",
+        "subject_refine": article_title or "",
+    }
+    questions = [
+        {"id": "law_subject", "label": "ما هو موضوع القانون الرئيسي؟ (إلزامي)", "type": "input", "placeholder": "مثال: قانون المنافسة..."},
+        {"id": "subject_refine", "label": "ما هو الموضوع الدقيق لهذه المادة؟ (اختياري)", "type": "input", "placeholder": "مثال: تعريفات..."},
+        {"id": "geo", "label": "ما النطاق الجغرافي؟", "type": "input", "placeholder": "الإمارات، الاتحاد الأوروبي..."},
+        {"id": "timeframe", "label": "ما الإطار الزمني؟", "type": "input", "placeholder": "آخر 10–15 سنة..."},
+        {"id": "sources", "label": "ما نوع المصادر المطلوبة؟", "type": "textarea", "placeholder": "تشريعات، سوابق..."},
+    ]
+    return {"article_title": article_title, "questions": questions, "prefill": prefill}
+
+
+def _keywords(text: str, top_k: int = 8) -> List[str]:
+    tokens = re.findall(r"[\w\u0600-\u06FF]+", text or "")
+    freq: Dict[str, int] = {}
+    for t in tokens:
+        nt = _norm_token(t)
+        if len(nt) < 3 or nt in _STOPWORDS:
+            continue
+        freq[nt] = freq.get(nt, 0) + 1
+    ordered = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
+    return [w for (w, c) in ordered[:top_k]]
+
+
+def _domain_filter_from_sources(sources: str) -> str:
+    toks = [t.lower() for t in _parse_sources_list(sources)] or [sources.lower()]
+    parts: List[str] = []
+
+    def add(s: str):
+        s = s.strip()
+        if s and s not in parts:
+            parts.append(s)
+
+    default_sites = (
+        "(site:.gov OR site:.go.ae OR site:.gov.uk OR site:.gouv OR site:.europa.eu "
+        "OR site:uaelegislation.gov.ae OR site:uncitral.un.org OR site:oecd.org OR site:worldbank.org "
+        "OR site:un.org OR site:ilo.org OR site:wipo.int OR site:.edu OR site:.ac.uk OR site:.ac.ae "
+        "OR site:jstor.org OR site:heinonline.org OR site:ssrn.com)"
+    )
+    if any("جميع" in t or "all" in t for t in toks):
+        return default_sites
+    if any(t in ("تشريعات", "قوانين", "لوائح") for t in toks):
+        add("(site:.gov OR site:.go.ae OR site:uaelegislation.gov.ae OR site:.gov.uk OR site:.gouv OR site:.europa.eu)")
+    if any(t in ("سوابق", "أحكام") for t in toks):
+        add("(site:courts.gov OR site:judiciary.* OR site:supremecourt.*)")
+    if any(t in ("معايير", "standards") for t in toks):
+        add("(site:uncitral.un.org OR site:oecd.org OR site:worldbank.org OR site:un.org OR site:ilo.org OR site:wipo.int)")
+    if any(t in ("بحوث", "أكاديمية") for t in toks):
+        add("(site:.edu OR site:.ac.uk OR site:.ac.ae OR site:jstor.org OR site:heinonline.org OR site:ssrn.com)")
+    if any(t in ("أخبار", "news") for t in toks):
+        add("(site:news.gov OR site:wam.ae OR site:reuters.com OR site:bloomberg.com)")
+    return "(" + " OR ".join(parts) + ")" if parts else default_sites
+
+
+def _geo_hint(geo: str) -> Dict[str, Any]:
+    g = (geo or "").lower()
+    domain_q, gl, lr, hl = "", None, None, "ar"
+
+    def add_sites(s: str):
+        nonlocal domain_q
+        domain_q = f"({domain_q} OR {s})" if domain_q else f"({s})"
+
+    if not g or "جميع" in g or "global" in g:
+        return {"domain_q": "", "gl": gl, "lr": lr, "hl": hl}
+    if "إمارات" in g or "uae" in g:
+        add_sites("site:uaelegislation.gov.ae OR site:.go.ae OR site:.gov.ae OR site:.ae")
+        gl, lr = "ae", "lang_ar"
+    elif "الاتحاد الأوروبي" in g or "eu" in g:
+        add_sites("site:eur-lex.europa.eu OR site:europa.eu")
+        gl, lr, hl = "be", "lang_en", "en"
+    elif "المملكة المتحدة" in g or "uk" in g:
+        add_sites("site:legislation.gov.uk OR site:.gov.uk")
+        gl, lr, hl = "uk", "lang_en", "en"
+    elif "الولايات المتحدة" in g or "usa" in g:
+        add_sites("site:.gov")
+        gl, lr, hl = "us", "lang_en", "en"
+    return {"domain_q": domain_q, "gl": gl, "lr": lr, "hl": hl}
+
+
+def _parse_timeframe_to_tbs(timeframe: str) -> Optional[str]:
+    """Return Google tbs for custom date range when possible."""
+    if not timeframe:
+        return None
+    s = timeframe.strip()
+    today = datetime.date.today()
+
+    def mmddyyyy(d: datetime.date) -> str:
+        return d.strftime("%m/%d/%Y")
+
+    # fix: group alternation properly
+    m = re.search(r"آخر\s+(\d+)\s*(?:سنة|سنوات)", s)
+    if m:
+        start = datetime.date(today.year - int(m.group(1)), 1, 1)
+        return f"cdr:1,cd_min:{mmddyyyy(start)},cd_max:{mmddyyyy(today)}"
+    m = re.search(r"منذ\s+(\d{4})", s)
+    if m:
+        start = datetime.date(int(m.group(1)), 1, 1)
+        return f"cdr:1,cd_min:{mmddyyyy(start)},cd_max:{mmddyyyy(today)}"
+    return None
+
+
+def _build_queries(base: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    ans = _normalize_answers(scope)
+    law_subject = ans["law_subject"].replace("لاقطاع", "القطاع")
+    subject_refine = ans["subject_refine"]
+    geo, timeframe, sources = ans["geo"], ans["timeframe"], ans["sources"]
+    base_text = (base.get("article_text") or "").strip()
+    kws = _keywords(base_text, top_k=5)
+    kws_str = " ".join([f'"{k}"' for k in kws])
+    main_topic = f'"{law_subject}"'
+    refined_topic = f'"{subject_refine}"' if subject_refine else ""
+    domain_filter = _domain_filter_from_sources(sources)
+    geo_hint = _geo_hint(geo)
+    geo_q = f" {geo_hint['domain_q']} " if geo_hint['domain_q'] else ""
+    timeframe_hint = ""
+    if "آخر 5" in timeframe:
+        timeframe_hint = f" after:{datetime.date.today().year - 5}"
+    elif "آخر 10" in timeframe:
+        timeframe_hint = f" after:{datetime.date.today().year - 10}"
+    elif "آخر 20" in timeframe:
+        timeframe_hint = f" after:{datetime.date.today().year - 20}"
+
+    queries: List[str] = []
+    q1 = " ".join(filter(None, [main_topic, refined_topic, kws_str, domain_filter, geo_q, timeframe_hint]))
+    queries.append(re.sub(r"\s+", " ", q1).strip())
+    if refined_topic:
+        q2 = " ".join(filter(None, [main_topic, refined_topic, domain_filter, geo_q, timeframe_hint]))
+        queries.append(re.sub(r"\s+", " ", q2).strip())
+    q3 = " ".join(
+        filter(
+            None,
+            [
+                '("best practices" OR "model law" OR "international standards")',
+                main_topic,
+                domain_filter,
+                geo_q,
+                timeframe_hint,
+            ],
+        )
+    )
+    queries.append(re.sub(r"\s+", " ", q3).strip())
+    q4 = " ".join(
+        filter(
+            None,
+            [f"({main_topic})", "(news OR analysis OR developments)", domain_filter, geo_q, timeframe_hint],
+        )
+    )
+    queries.append(re.sub(r"\s+", " ", q4).strip())
+    return list(dict.fromkeys(q for q in queries if q))
+
+
+# -----------------------------------------------------------------------------
+# Prompt builder (simplified per performance)
+# -----------------------------------------------------------------------------
+
+def _build_research_prompt(law_subject: str, article_title: str, article_snippet_ar: str) -> str:
+    """Arabic instruction asking the model to return STRICT JSON with sources."""
+    snippet = (article_snippet_ar or "").strip()
+    if len(snippet) > 800:
+        snippet = snippet[:800] + "..."
+    prompt = (
+        "أنت باحث قانوني خبير في المقارنات التشريعية.\n\n"
+        f"**مهمتك:** البحث عن أفضل الممارسات والمعايير والمواد القانونية المتعلقة بموضوع **'{law_subject}'**.\n"
+        f"**التركيز:** '{article_title or 'المادة بشكل عام'}' — نص مقتطف: '{snippet}'\n\n"
+        "**المطلوب:**\n"
+        "1. ابحث عن 8-12 مرجعًا عالي الجودة (قوانين، معايير دولية، تقارير موثوقة).\n"
+        "2. لكل مرجع، اشرح في حقل `why` صلته بالموضوع وأهميته.\n"
+        "3. أعطِ الأولوية للمصادر الرسمية والحكومية والدولية.\n\n"
+        "**قواعد المخرجات:**\n"
+        "أعد JSON صارم فقط بالصيغة: {\"results\": [...], \"took_ms\": <number>}، حيث كل عنصر في results\n"
+        "يحمل الحقول: title, url, snippet, score, why. لا Markdown. لا مفاتيح إضافية."
+    )
+    return prompt
+
+
+def _parse_json_only(txt: str) -> Optional[Dict[str, Any]]:
+    if not txt:
+        return None
+    try:
+        return json.loads(txt)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}$", txt.strip())
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+# -----------------------------------------------------------------------------
+# OpenAI call
+# -----------------------------------------------------------------------------
+
+def _build_tools() -> List[Dict[str, Any]]:
+    tools: List[Dict[str, Any]] = [{"type": "web_search_preview"}]
+    if OPENAI_VECTOR_STORES:
+        tools.append({"type": "file_search", "vector_store_ids": OPENAI_VECTOR_STORES})
+    if OPENAI_ENABLE_CODE_INTERPRETER:
+        tools.append({"type": "code_interpreter", "container": {"type": "auto"}})
+    return tools
+
+
+def _call_openai_responses_json(model: str, prompt: str, max_tool_calls: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if _client is None:
+        return None, "OpenAI client not initialized."
+
+    system_instructions = (
+        "You are an expert legal/comparative-law researcher. Return STRICT JSON only as described in the user prompt. "
+        "No markdown, no code fences, no extra keys, just the JSON object."
+    )
+
+    model_l = (model or "").lower()
+    is_deep_like = ("deep" in model_l) or ("o4" in model_l) or ("o3" in model_l)
+
+    kwargs: Dict[str, Any] = {"model": model}
+
+    if is_deep_like:
+        # Responses API (deep research)
+        kwargs.update(
+            {
+                "input": [{"role": "user", "content": prompt}],
+                "instructions": system_instructions,
+                "max_output_tokens": 8192,
+                "tools": _build_tools(),
+                "tool_choice": "auto",
+                "max_tool_calls": max_tool_calls,
+            }
+        )
+        if OPENAI_BACKGROUND:
+            kwargs["background"] = True
+    else:
+        # Chat Completions fallback for non-deep models
+        kwargs.update(
+            {
+                "messages": [
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 4096,
+                "response_format": {"type": "json_object"},
+            }
+        )
+
+    last_err: Optional[str] = None
+    for attempt in range(1, OPENAI_RETRIES + 1):
+        try:
+            text = None
+            if is_deep_like:
+                logger.info(
+                    f"Calling OpenAI 'responses' endpoint with model {model} (Attempt {attempt})"
+                )
+                resp = _client.responses.create(**kwargs)
+                # In background mode, output_text may be empty until the job completes
+                text = getattr(resp, "output_text", None)
+                if OPENAI_BACKGROUND and not text:
+                    job_id = getattr(resp, "id", None)
+                    return (
+                        {
+                            "results": [],
+                            "took_ms": 0,
+                            "note": f"BACKGROUND_REQUESTED job_id={job_id}",
+                        },
+                        None,
+                    )
+            else:
+                logger.info(
+                    f"Calling OpenAI 'chat.completions' endpoint with model {model} (Attempt {attempt})"
+                )
+                resp = _client.chat.completions.create(**kwargs)
+                if resp.choices:
+                    text = resp.choices[0].message.content
+
+            if not text:
+                last_err = (
+                    f"Model returned empty response on attempt {attempt}. Raw response: {str(resp)[:300]}"
+                )
+                break  # probably filtered or background
+
+            data = _parse_json_only(text)
+            if data and isinstance(data.get("results"), list):
+                return data, None  # Success
+
+            last_err = f"Model returned invalid JSON on attempt {attempt}. Response: {text[:300]}"
+
+        except Exception as e:  # noqa: BLE001
+            last_err = f"OpenAI API error on attempt {attempt}: {e}"
+            logger.error(last_err)
+
+        if attempt < OPENAI_RETRIES:
+            wait_time = OPENAI_BACKOFF_BASE * (2 ** (attempt - 1))
+            logger.info(f"Waiting for {wait_time:.2f} seconds before retrying...")
+            time.sleep(wait_time)
+
+    return None, last_err
+
+
+# -----------------------------------------------------------------------------
+# Fallbacks and re-ranking
+# -----------------------------------------------------------------------------
+
+def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        key = (it.get("title", "").strip().lower(), _host(it.get("url", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
+def _fallback_search_via_serpapi(
+    queries: Iterable[str],
+    per_q: int,
+    geo_hint: Dict[str, Any],
+    tbs: Optional[str],
+) -> List[Dict[str, Any]]:
+    if SERPAPI_DISABLED or not SERPAPI_KEY:
+        return []
+    results: List[Dict[str, Any]] = []
+    params_common = {
+        "engine": "google",
+        "hl": geo_hint.get("hl") or "ar",
+        "gl": geo_hint.get("gl"),
+        "lr": geo_hint.get("lr"),
+        "num": per_q,
+        "api_key": SERPAPI_KEY,
+    }
+    if tbs:
+        params_common["tbs"] = tbs
+    with httpx.Client(timeout=40) as client:
+        for q in queries:
+            try:
+                r = client.get("https://serpapi.com/search.json", params={**params_common, "q": q})
+                data = r.json()
+                for item in (data.get("organic_results") or []):
+                    url = item.get("link") or ""
+                    if not url or not _allowed(url):
+                        continue
+                    results.append(
+                        {
+                            "title": item.get("title") or "",
+                            "url": url,
+                            "snippet": (item.get("snippet") or item.get("rich_snippet") or ""),
+                            "score": float(item.get("position") or 99),
+                            "why": "نتيجة بحث احتياطية من Google.",
+                        }
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"SerpAPI call failed for query '{q}': {e}")
+                continue
+    return _dedupe(results)[:30]
+
+
+def _rerank_results(
+    results: List[Dict[str, Any]],
+    ans: Dict[str, str],
+    base_title: str,
+    base_text: str,
+) -> List[Dict[str, Any]]:
+    if not results:
+        return results
+    kw = set(_keywords(base_title + " " + base_text, top_k=10))
+    if ans.get("subject_refine"):
+        kw.update(_keywords(ans["subject_refine"]))
+
+    def score_one(it: Dict[str, Any]) -> float:
+        s = 0.0
+        h = _host(it.get("url", ""))
+        title_snip = (it.get("title") or "") + " " + (it.get("snippet") or "")
+        if any(x in h for x in [
+            "uaelegislation.gov.ae",
+            ".go.ae",
+            ".gov.ae",
+            ".gov",
+            "eur-lex.europa.eu",
+        ]):
+            s += 40
+        elif any(x in h for x in [
+            "uncitral.un.org",
+            "oecd.org",
+            "worldbank.org",
+            "un.org",
+            "wipo.int",
+        ]):
+            s += 35
+        elif any(x in h for x in [
+            ".edu",
+            ".ac.",
+            "jstor.org",
+            "heinonline.org",
+            "ssrn.com",
+        ]):
+            s += 25
+        toks = set(_keywords(title_snip))
+        overlap = len(kw & toks)
+        s += overlap * 8.0
+        if "نتيجة بحث احتياطية" in (it.get("why") or ""):
+            s -= 10
+        if ans["law_subject"].lower() in title_snip.lower():
+            s += 15
+        return s
+
+    ranked = sorted(results, key=score_one, reverse=True)
+    return _dedupe(ranked)[:30]
+
+
+# -----------------------------------------------------------------------------
+# Public entrypoint
+# -----------------------------------------------------------------------------
+
+def deepsearch_execute(_model_unused: Any, scope: Dict[str, Any]) -> Dict[str, Any]:
+    t0 = time.time()
+    base = scope.get("base_article") or {}
+    if not base:
+        return {"queries": [], "results": [], "note": "BASE_ARTICLE_MISSING", "took_ms": 0}
+
+    ans = _normalize_answers(scope)
+    if ans["law_subject"] == "موضوع قانون غير محدد":
+        return {
+            "queries": [],
+            "results": [],
+            "note": "MANDATORY_LAW_SUBJECT_MISSING",
+            "took_ms": int((time.time() - t0) * 1000),
+        }
+
+    base_title = (base.get("article_title") or "").strip()
+    base_text = (base.get("article_text") or "").strip()
+    queries = _build_queries(base, scope)
+    logger.info("[deepsearch_execute] Built queries: %s", queries)
+
+    prompt = _build_research_prompt(
+        law_subject=ans["law_subject"],
+        article_title=base_title,
+        article_snippet_ar=base_text,
+    )
+
+    note_parts: List[str] = []
+
+    # Primary deep model
+    data, err = _call_openai_responses_json(OPENAI_DEEP_MODEL, prompt, OPENAI_MAX_TOOL_CALLS)
+    if err or not data:
+        note_parts.append(f"Primary model ({OPENAI_DEEP_MODEL}) failed: {err}")
+        if OPENAI_FALLBACK_MODEL:
+            logger.warning(f"Primary failed. Trying fallback: {OPENAI_FALLBACK_MODEL}")
+            data, err = _call_openai_responses_json(
+                OPENAI_FALLBACK_MODEL, prompt, OPENAI_MAX_TOOL_CALLS
+            )
+            if err:
+                note_parts.append(f"Fallback model ({OPENAI_FALLBACK_MODEL}) failed: {err}")
+
+        if not data and OPENAI_ALT_MODEL:
+            logger.warning(f"All deep models failed. Trying alt model: {OPENAI_ALT_MODEL}")
+            data, err = _call_openai_responses_json(OPENAI_ALT_MODEL, prompt, OPENAI_MAX_TOOL_CALLS)
+            if err:
+                note_parts.append(f"Alt model ({OPENAI_ALT_MODEL}) failed: {err}")
+
+    took_ms = int((time.time() - t0) * 1000)
+
+    # If deep models failed entirely, try SerpAPI fallback if configured
+    if not data or not isinstance(data, dict) or not data.get("results"):
+        fb_note = "OPENAI_FAILED_OR_EMPTY"
+        if not SERPAPI_DISABLED and SERPAPI_KEY:
+            logger.info("Falling back to SerpAPI search.")
+            geo_h = _geo_hint(ans["geo"])
+            tbs = _parse_timeframe_to_tbs(ans["timeframe"])
+            fallback_results = _fallback_search_via_serpapi(
+                queries, per_q=8, geo_hint=geo_h, tbs=tbs
+            )
+            ranked = _rerank_results(fallback_results, ans, base_title, base_text)
+            fb_note += " | SerpAPI_FALLBACK_USED"
+            return {
+                "queries": queries,
+                "results": ranked,
+                "note": fb_note
+                + (" | " + " / ".join(note_parts) if note_parts else ""),
+                "took_ms": took_ms,
+                "applied_scope": ans,
+            }
+        else:
+            return {
+                "queries": queries,
+                "results": [],
+                "note": fb_note + " | SerpAPI is disabled.",
+                "took_ms": took_ms,
+                "applied_scope": ans,
+            }
+
+    # Re-rank deep model results, attach metadata
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        results = []
+    results = _rerank_results(results, ans, base_title, base_text)
+
+    data["results"] = results
+    data["took_ms"] = data.get("took_ms") or took_ms
+    if note_parts:
+        data["note"] = " / ".join(note_parts)
+    data["applied_scope"] = ans
+
+    return data
