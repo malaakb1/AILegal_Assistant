@@ -708,19 +708,19 @@ const ResultsPage: React.FC = () => {
     };
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 p-6" dir="rtl">
+        <div className="min-h-screen bg-gradient-to-br from-beige-100 via-beige-50 to-gold-50 p-6" dir="rtl">
         <div className="mx-auto max-w-full px-4 lg:px-8">
-            <div className="mb-6 rounded-xl bg-white p-6 shadow-lg">
+            <div className="mb-6 rounded-2xl bg-white p-8 shadow-2xl border-2 border-gold-200">
             <div className="flex flex-col items-center justify-between sm:flex-row">
                 <div className="mb-4 text-center sm:mb-0 sm:text-right">
-                <h1 className="mb-2 text-3xl font-bold text-gray-900">تقرير المقارنة النهائي</h1>
-                <p className="text-gray-600">نتائج مقارنة {primaryFileName}</p>
+                <h1 className="mb-2 text-4xl font-bold text-darktext">تقرير المقارنة النهائي</h1>
+                <p className="text-xl text-darktext-light">نتائج مقارنة {primaryFileName}</p>
                 </div>
                 <div className="flex flex-wrap justify-center space-x-reverse gap-2">
                 <button
                     onClick={exportToPDF}
                     disabled={isExporting}
-                    className="flex items-center rounded-lg bg-red-600 px-4 py-2 font-medium text-white transition-colors hover:bg-red-700 disabled:bg-red-400"
+                    className="flex items-center rounded-xl bg-gradient-to-r from-red-500 to-red-600 px-5 py-3 font-bold text-white transition-all hover:from-red-600 hover:to-red-700 disabled:opacity-60 shadow-lg hover:shadow-xl"
                 >
                     {isExporting ? <Loader2 className="ml-2 h-5 w-5 animate-spin" /> : <Download className="ml-2 h-5 w-5" />}
                     تصدير PDF
@@ -728,26 +728,26 @@ const ResultsPage: React.FC = () => {
                 <button
                     onClick={exportToWord}
                     disabled={isExporting}
-                    className="flex items-center rounded-lg bg-blue-600 px-4 py-2 font-medium text-white transition-colors hover:bg-blue-700 disabled:bg-blue-400"
+                    className="flex items-center rounded-xl bg-gradient-to-r from-gold-500 to-gold-600 px-5 py-3 font-bold text-white transition-all hover:from-gold-600 hover:to-gold-700 disabled:opacity-60 shadow-lg hover:shadow-xl"
                 >
                     {isExporting ? <Loader2 className="ml-2 h-5 w-5 animate-spin" /> : <Download className="ml-2 h-5 w-5" />}
                     تصدير WORD
                 </button>
                 <button
                     onClick={exportToJSON}
-                    className="flex items-center rounded-lg bg-green-600 px-4 py-2 font-medium text-white transition-colors hover:bg-green-700"
+                    className="flex items-center rounded-xl bg-gradient-to-r from-green-500 to-green-600 px-5 py-3 font-bold text-white transition-all hover:from-green-600 hover:to-green-700 shadow-lg hover:shadow-xl"
                 >
                     <Download className="ml-2 h-5 w-5" /> تصدير JSON
                 </button>
                 <button
                     onClick={handleBackToUpload}
-                    className="flex items-center rounded-lg bg-purple-600 px-4 py-2 font-medium text-white transition-colors hover:bg-purple-700"
+                    className="flex items-center rounded-xl bg-gradient-to-r from-beige-600 to-beige-700 px-5 py-3 font-bold text-white transition-all hover:from-beige-700 hover:to-beige-800 shadow-lg hover:shadow-xl"
                 >
                     <RotateCcw className="ml-2 h-5 w-5" /> مقارنة جديدة
                 </button>
                 <button
                     onClick={handleStartNew}
-                    className="flex items-center rounded-lg bg-gray-600 px-4 py-2 font-medium text-white transition-colors hover:bg-gray-700"
+                    className="flex items-center rounded-xl bg-gradient-to-r from-gray-600 to-gray-700 px-5 py-3 font-bold text-white transition-all hover:from-gray-700 hover:to-gray-800 shadow-lg hover:shadow-xl"
                 >
                     <Home className="ml-2 h-5 w-5" /> الرئيسية
                 </button>
@@ -755,29 +755,29 @@ const ResultsPage: React.FC = () => {
             </div>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-xl">
+            <div className="overflow-hidden rounded-3xl border-2 border-gold-200 bg-white shadow-2xl">
             <div className="overflow-x-auto">
                 <table ref={tableRef} className="w-full text-right text-sm">
-                <thead className="bg-gray-100">
+                <thead className="bg-gradient-to-r from-beige-200 to-gold-200">
                     <tr>
-                    <th className="sticky right-0 min-w-[300px] border-l bg-yellow-100 px-3 py-3 font-semibold text-gray-600">
+                    <th className="sticky right-0 min-w-[300px] border-l bg-gradient-to-r from-gold-100 to-gold-200 px-3 py-3 font-bold text-darktext">
                         <div className="flex items-center justify-center">
                         {loadingStates[primaryFileName] && <Loader2 className="ml-2 h-4 w-4 animate-spin" />}
                         {primaryFileName}
                         </div>
                     </th>
                     {comparisonFileNames.map((fileName: string) => (
-                        <th key={fileName} className="min-w-[300px] border-l px-3 py-3 font-semibold text-gray-600">
+                        <th key={fileName} className="min-w-[300px] border-l px-3 py-3 font-bold text-darktext">
                         <div className="flex items-center justify-center">
                             {loadingStates[fileName] && <Loader2 className="ml-2 h-4 w-4 animate-spin" />}
                             {fileName}
                         </div>
                         </th>
                     ))}
-                    <th className="min-w-[300px] border-l bg-green-50 px-3 py-3 font-semibold text-gray-600">
+                    <th className="min-w-[300px] border-l bg-gradient-to-r from-green-100 to-green-200 px-3 py-3 font-bold text-darktext">
                         تعديلات إدارة التشريعات (قابل للتحرير)
                     </th>
-                    <th className="min-w-[360px] bg-purple-50 px-3 py-3 font-semibold text-gray-600">
+                    <th className="min-w-[360px] bg-gradient-to-r from-beige-100 to-gold-100 px-3 py-3 font-bold text-darktext">
                         الذكاء الاصطناعي: اقتراح & بحث معمّق
                     </th>
                     </tr>
@@ -796,12 +796,12 @@ const ResultsPage: React.FC = () => {
                     report.map((articleEntry, index) => (
                         <tr key={index} className="border-t border-gray-200">
                         {/* المادة الأساسية */}
-                        <td className="sticky right-0 border-l bg-yellow-50 px-3 py-4 align-top shadow-md">
-                            <h4 className="mb-2 font-bold text-gray-800">
+                        <td className="sticky right-0 border-l bg-gradient-to-r from-gold-50 to-gold-100 px-3 py-4 align-top shadow-md">
+                            <h4 className="mb-2 font-bold text-darktext">
                             {articleEntry.base_article_info.article_number} -{" "}
                             {articleEntry.base_article_info.article_title || "بدون عنوان"}
                             </h4>
-                            <p className="whitespace-pre-wrap text-gray-700">
+                            <p className="whitespace-pre-wrap text-darktext-light">
                             {articleEntry.base_article_info.article_text}
                             </p>
                         </td>
@@ -828,7 +828,7 @@ const ResultsPage: React.FC = () => {
                                         >
                                         {sim.reason_for_similarity}
                                         </div>
-                                        <p className="whitespace-pre-wrap text-gray-700">{sim.matched_article_full_text}</p>
+                                        <p className="whitespace-pre-wrap text-darktext-light">{sim.matched_article_full_text}</p>
                                     </div>
                                     ))
                                 ) : (
@@ -845,24 +845,24 @@ const ResultsPage: React.FC = () => {
                         })}
 
                         {/* ملاحظات المستخدم */}
-                        <td className="border-l bg-green-50 px-3 py-4 align-top">
+                        <td className="border-l bg-gradient-to-r from-green-50 to-green-100 px-3 py-4 align-top">
                             <textarea
                             ref={(el) => adjustTextareaHeight(el)}
                             value={editableData[`editable-${index}`] || ""}
                             onChange={(e) => handleEditableChange(index, e.target.value)}
                             placeholder="أدخل تعديلاتك هنا..."
-                            className="min-h-[120px] w-full resize-none overflow-hidden rounded-lg border border-green-200 bg-white p-2 text-sm text-green-900 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-green-500"
+                            className="min-h-[120px] w-full resize-none overflow-hidden rounded-xl border-2 border-green-300 bg-white p-3 text-sm text-darktext placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gold-500"
                             />
                         </td>
 
                         {/* الذكاء الاصطناعي: اقتراح & بحث معمّق */}
-                        <td className="bg-purple-50 px-3 py-4 align-top">
+                        <td className="bg-gradient-to-r from-beige-50 to-gold-50 px-3 py-4 align-top">
                             {/* أزرار التحكم */}
                             <div className="mb-3 flex flex-col gap-2">
                             <button
                                 onClick={() => handleGenerateSuggestion(index)}
                                 disabled={aiPerRow[index]?.loading}
-                                className="w-full rounded-lg bg-purple-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-700"
+                                className="w-full rounded-xl bg-gradient-to-r from-gold-500 to-gold-600 px-3 py-2 text-sm font-bold text-white transition-all hover:from-gold-600 hover:to-gold-700 shadow-lg"
                             >
                                 {aiPerRow[index]?.loading ? (
                                 <>
@@ -882,7 +882,7 @@ const ResultsPage: React.FC = () => {
                                 setQaArticleIndex(index);
                                 setQaOpen(true);
                                 }}
-                                className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+                                className="w-full rounded-xl bg-gradient-to-r from-beige-500 to-beige-600 px-3 py-2 text-sm font-bold text-white transition-all hover:from-beige-600 hover:to-beige-700 shadow-lg"
                             >
                                 <Search className="ml-2 inline h-4 w-4" />
                                 بحث معمّق

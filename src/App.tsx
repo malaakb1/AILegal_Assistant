@@ -2,22 +2,22 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 
+import HomePage from './components/HomePage';
+import SmartStoragePage from './components/SmartStoragePage';
 import WelcomePage from './components/WelcomePage';
-import DemoOrUploadPage from './components/DemoOrUploadPage'; // <-- استيراد جديد
+import DemoOrUploadPage from './components/DemoOrUploadPage';
 import FileUploadPage from './components/FileUploadPage';
 import { FileData } from './types/legislation';
 
 const API_URL = 'http://127.0.0.1:8000';
 
-// --- ✨ ملفات الديمو المحددة مسبقًا ✨ ---
 const DEMO_FILES = {
   primary: 'TashreaDraft-Copy.json',
-  // comparisons: ['DubaiLaw.json','AbuDhabiLaw.json','KuwaitLaw.json','JordanLaw.json','EgyptLaw.json','UNCITRALLaw.json']
   comparisons: ['JordanLaw-Copy.json','DubaiLaw-Copy.json']
 };
 
 function App() {
-  const [currentView, setCurrentView] = useState<'welcome' | 'choice' | 'upload'>('welcome');
+  const [currentView, setCurrentView] = useState<'home' | 'storage' | 'welcome' | 'choice' | 'upload'>('home');
   const [primaryFile, setPrimaryFile] = useState<FileData | null>(null);
   const [comparisonFiles, setComparisonFiles] = useState<FileData[]>([]);
   const navigate = useNavigate();
@@ -45,7 +45,6 @@ function App() {
     }
   };
 
-  // --- ✨ دوال جديدة لإدارة شاشة الاختيار ✨ ---
   const handleSelectDemo = async () => {
     try {
         const payload = {
@@ -73,6 +72,15 @@ function App() {
 
   const renderContent = () => {
     switch (currentView) {
+      case 'home':
+        return (
+          <HomePage
+            onSelectStorage={() => setCurrentView('storage')}
+            onSelectComparison={() => setCurrentView('welcome')}
+          />
+        );
+      case 'storage':
+        return <SmartStoragePage onBackToHome={() => setCurrentView('home')} />;
       case 'welcome':
         return <WelcomePage onStartComparison={() => setCurrentView('choice')} />;
       case 'choice':
@@ -88,7 +96,12 @@ function App() {
           />
         );
       default:
-        return <WelcomePage onStartComparison={() => setCurrentView('choice')} />;
+        return (
+          <HomePage
+            onSelectStorage={() => setCurrentView('storage')}
+            onSelectComparison={() => setCurrentView('welcome')}
+          />
+        );
     }
   };
 
