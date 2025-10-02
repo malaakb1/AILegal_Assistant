@@ -133,7 +133,7 @@ const HomePage: React.FC<HomePageProps> = ({ onSelectStorage, onSelectComparison
             <h3 className="text-2xl font-bold text-darktext mb-3">لماذا منصتنا؟</h3>
             <div className="grid md:grid-cols-3 gap-6 text-darktext-light">
               <div>
-                <div className="text-4xl font-bold text-gold-600 mb-2">100%</div>
+                <div className="text-4xl font-bold text-gold-600 mb-2">98%</div>
                 <p className="text-lg">دقة في التصنيف</p>
               </div>
               <div>
